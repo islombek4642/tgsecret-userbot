@@ -1,0 +1,177 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String           @id @default(cuid())
+  telegramId      BigInt           @unique
+  username        String?          @unique
+  firstName       String
+  lastName        String?
+  photoUrl        String?
+  email           String?          @unique
+  password        String?          // For admin panel login
+  isAdmin         Boolean          @default(false)
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  
+  sessions        BotSession[]
+  savedMedia      SavedMedia[]
+  storyLogs       StoryLog[]
+  apiKeys         APIKey[]
+  refreshTokens   RefreshToken[]
+  subscriptions   UserSubscription[]
+}
+
+model BotSession {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionString   String           @db.Text // Encrypted Pyrogram session
+  phoneNumber     String?
+  isActive        Boolean          @default(false)
+  lastActive      DateTime?
+  apiId           String
+  apiHash         String           // Encrypted
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  
+  @@unique([userId])
+}
+
+model SavedMedia {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaType       MediaType
+  originalChatId  BigInt
+  originalMsgId   Int
+  savedMsgId      Int?
+  fileName        String?
+  filePath        String?          // Local storage path
+  fileSize        Int?
+  mimeType        String?
+  caption         String?          @db.Text
+  senderUsername  String?
+  senderName      String?
+  isViewOnce      Boolean          @default(false)
+  metadata        Json?            // Additional metadata
+  createdAt       DateTime         @default(now())
+  
+  @@index([userId, createdAt])
+}
+
+model StoryLog {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetUsername  String
+  storyId         String
+  mediaType       MediaType
+  filePath        String?
+  fileSize        Int?
+  caption         String?          @db.Text
+  viewCount       Int?
+  expiresAt       DateTime?
+  downloadedAt    DateTime         @default(now())
+  metadata        Json?
+  
+  @@index([userId, downloadedAt])
+}
+
+model ForceSubscribeChannel {
+  id              String           @id @default(cuid())
+  channelId       BigInt           @unique
+  username        String           @unique
+  title           String
+  isRequired      Boolean          @default(true)
+  addedBy         String?          // Admin who added it
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  
+  subscriptions   UserSubscription[]
+}
+
+model UserSubscription {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channelId       String
+  channel         ForceSubscribeChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  isSubscribed    Boolean          @default(false)
+  lastChecked     DateTime         @default(now())
+  subscribedAt    DateTime?
+  
+  @@unique([userId, channelId])
+  @@index([userId, isSubscribed])
+}
+
+model APIKey {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider        AIProvider
+  keyName         String
+  encryptedKey    String           @db.Text // Encrypted API key
+  encryptedIv     String           // Initialization vector for encryption
+  endpoint        String?          // Custom endpoint URL
+  model           String?          // Default model to use
+  maxTokens       Int              @default(4096)
+  usageCount      Int              @default(0)
+  lastUsed        DateTime?
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  
+  @@unique([userId, provider])
+  @@index([userId, isActive])
+}
+
+model RefreshToken {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token           String           @unique
+  expiresAt       DateTime
+  createdAt       DateTime         @default(now())
+  
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model WebhookLog {
+  id              String           @id @default(cuid())
+  event           String
+  payload         Json
+  status          String
+  error           String?
+  createdAt       DateTime         @default(now())
+  
+  @@index([createdAt])
+}
+
+enum MediaType {
+  PHOTO
+  VIDEO
+  AUDIO
+  DOCUMENT
+  VOICE
+  STICKER
+  ANIMATION
+}
+
+enum AIProvider {
+  OPENAI
+  CLAUDE
+  GEMINI
+  CUSTOM
+}
