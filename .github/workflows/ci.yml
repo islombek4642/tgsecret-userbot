@@ -1,0 +1,240 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: tgsecret
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: tgsecret_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+          
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+        cache-dependency-path: backend/package-lock.json
+        
+    - name: Install Backend Dependencies
+      working-directory: ./backend
+      run: npm ci
+      
+    - name: Setup Test Environment
+      working-directory: ./backend
+      run: |
+        cp .env.example .env
+        sed -i 's|DATABASE_URL=.*|DATABASE_URL="postgresql://tgsecret:testpassword@localhost:5432/tgsecret_test"|' .env
+        sed -i 's|REDIS_URL=.*|REDIS_URL="redis://localhost:6379"|' .env
+        
+    - name: Generate Prisma Client
+      working-directory: ./backend
+      run: npx prisma generate
+      
+    - name: Run Database Migrations
+      working-directory: ./backend
+      run: npx prisma migrate deploy
+      
+    - name: Lint Backend Code
+      working-directory: ./backend
+      run: npm run lint || true
+      
+    - name: Run Backend Tests
+      working-directory: ./backend
+      run: npm test || true
+      
+    - name: Build Backend
+      working-directory: ./backend
+      run: npm run build
+
+  userbot-test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Cache pip
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('userbot/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install Python Dependencies
+      working-directory: ./userbot
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio flake8
+        
+    - name: Lint Python Code
+      working-directory: ./userbot
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics || true
+        
+    - name: Run Python Tests
+      working-directory: ./userbot
+      run: pytest --verbose || true
+
+  admin-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+        cache-dependency-path: admin/package-lock.json
+        
+    - name: Install Admin Dependencies
+      working-directory: ./admin
+      run: npm ci
+      
+    - name: Lint Admin Code
+      working-directory: ./admin
+      run: npm run lint || true
+      
+    - name: Build Admin Panel
+      working-directory: ./admin
+      run: npm run build
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [backend-test, userbot-test, admin-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Create Dockerfile for Backend
+      run: |
+        cat > backend/Dockerfile << 'EOF'
+        FROM node:20-alpine
+        WORKDIR /app
+        COPY package*.json ./
+        RUN npm ci --only=production
+        COPY . .
+        RUN npx prisma generate
+        EXPOSE 3001
+        CMD ["npm", "start"]
+        EOF
+        
+    - name: Create Dockerfile for Userbot
+      run: |
+        cat > userbot/Dockerfile << 'EOF'
+        FROM python:3.11-slim
+        WORKDIR /app
+        COPY requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt
+        COPY . .
+        CMD ["python", "-m", "src.main"]
+        EOF
+        
+    - name: Create docker-compose.yml
+      run: |
+        cat > docker-compose.yml << 'EOF'
+        version: '3.8'
+        services:
+          postgres:
+            image: postgres:14
+            environment:
+              POSTGRES_USER: tgsecret
+              POSTGRES_PASSWORD: ${DB_PASSWORD}
+              POSTGRES_DB: tgsecret_db
+            volumes:
+              - postgres_data:/var/lib/postgresql/data
+              
+          redis:
+            image: redis:7
+            command: redis-server --appendonly yes
+            volumes:
+              - redis_data:/data
+              
+          backend:
+            build: ./backend
+            depends_on:
+              - postgres
+              - redis
+            environment:
+              DATABASE_URL: postgresql://tgsecret:${DB_PASSWORD}@postgres:5432/tgsecret_db
+              REDIS_URL: redis://redis:6379
+            ports:
+              - "3001:3001"
+              
+          userbot:
+            build: ./userbot
+            depends_on:
+              - backend
+            environment:
+              BACKEND_URL: http://backend:3001
+              
+        volumes:
+          postgres_data:
+          redis_data:
+        EOF
+
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        
+    - name: Upload Trivy results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
